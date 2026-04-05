@@ -1,6 +1,16 @@
 # web-assets-extractor
 
-Desktop app locale in Python per estrarre font, palette colori, copy e asset digitali da una pagina web pubblica.
+Local Python desktop app for analyzing a public website and collecting the context needed for a redesign: fonts, color palette, copy, digital assets, and the brand's main routes.
+
+## What It Does
+
+- analyzes a single public page or explores the main internal routes with the optional `Brand Scan` mode
+- extracts fonts, color palettes, headlines, CTA candidates, copy blocks, and digital assets
+- uses the rendered DOM for websites that load content through JavaScript or Shadow DOM
+- keeps page-level context for copy and assets, so you know which route each item comes from
+- lets you select and download only the assets you actually want
+- supports chunked media streams and can combine audio + video into a final `MP4` through muxing
+- handles YouTube videos through `yt-dlp`
 
 ## Stack
 
@@ -10,8 +20,9 @@ Desktop app locale in Python per estrarre font, palette colori, copy e asset dig
 - BeautifulSoup4
 - requests
 - Pillow
+- yt-dlp
 
-## Avvio
+## Local Run
 
 ```bash
 python3.12 -m venv .venv
@@ -20,15 +31,30 @@ pip install -e .
 python -m web_assets_extractor.main
 ```
 
-Per scaricare stream media chunked e combinare audio + video in un file finale `MP4` tramite muxing, `ffmpeg` deve essere installato e disponibile nel `PATH`.
+## Optional Dependencies
 
-Per i video YouTube, l'app usa `yt-dlp`: se `ffmpeg` e disponibile scarica e combina la miglior coppia audio/video, altrimenti ripiega automaticamente su un `MP4` progressivo.
+- `ffmpeg`
+  Required for downloading chunked media streams and combining audio + video into a final `MP4` via muxing.
 
-Per i siti che montano gli asset via JavaScript, l'app usa anche Playwright per leggere il DOM renderizzato. Se il browser Playwright non e presente nel bundle, l'analisi prova automaticamente a usare Chrome o Edge installati sul computer.
+- Chromium browser for Playwright
+  The app uses Playwright to inspect the rendered DOM on websites that mount content through JavaScript. If the Playwright browser is not available in the bundle, the analysis automatically tries to use an installed browser such as Chrome, Edge, Chromium, or Brave.
 
-## Build Desktop
+- `yt-dlp`
+  Already included as a project dependency. For YouTube videos, if `ffmpeg` is available the app downloads and combines the best audio/video pair; otherwise it falls back to a progressive `MP4` when possible.
 
-Per generare la cartella `dist/` con un bundle desktop PySide6:
+## How To Use
+
+1. Enter a public URL.
+2. Choose what to extract: fonts, colors, copy, and assets.
+3. Optionally enable `Brand Scan` to explore the main routes on the same domain.
+4. Run the analysis and review the results in the app tabs.
+5. Select only the assets you need and download them.
+
+`Brand Scan` is designed for redesign work: it enriches the brand context, but it is slower than scanning a single page.
+
+## Desktop Build
+
+To generate the `dist/` folder with a PySide6 desktop bundle:
 
 ```bash
 python3.12 -m venv .venv
@@ -36,13 +62,13 @@ source .venv/bin/activate
 ./scripts/build.sh
 ```
 
-Lo script:
+The script:
 
-- installa le dipendenze di build
-- genera `dist/web-assets-extractor/`
-- produce anche `dist/web-assets-extractor.app` su macOS
+- installs the build dependencies
+- generates `dist/web-assets-extractor/`
+- also produces `dist/web-assets-extractor.app` on macOS
 
-Il binario finale viene creato in:
+The final app bundle is created in:
 
 ```bash
 dist/web-assets-extractor.app
@@ -50,9 +76,24 @@ dist/web-assets-extractor.app
 
 ## Output
 
-Ogni analisi crea una cartella dedicata in `analysis_runs/` con:
+Each analysis creates a dedicated folder in `analysis_runs/` with:
 
 - `report.md`
 - `report.json`
 - `assets/`
-- `assets.zip` se richiesto
+- `assets.zip` when requested
+
+Reports include:
+
+- analysis overview
+- explored pages
+- detected fonts and colors
+- headlines, CTA candidates, and copy blocks
+- assets with source context
+- operational notes about fallbacks, browser rendering, and limitations encountered
+
+## Notes
+
+- analysis works best on public, non-authenticated content
+- SPA websites or highly dynamic pages may take longer because the app also uses a headless browser
+- temporary media URLs, especially on YouTube, can expire: if preview or download fails after a while, rerun the analysis

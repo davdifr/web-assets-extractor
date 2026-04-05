@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QCheckBox,
     QSplitter,
+    QSpinBox,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -171,6 +172,23 @@ class MainWindow(QMainWindow):
         self.zip_checkbox = QCheckBox("Create ZIP after selected assets download")
         output_layout.addWidget(self.zip_checkbox)
 
+        brand_scan_group = QGroupBox("Brand Scan")
+        brand_scan_layout = QVBoxLayout(brand_scan_group)
+        brand_scan_layout.setSpacing(6)
+        self.route_scan_checkbox = QCheckBox("Explore main internal routes for brand context")
+        self.route_scan_checkbox.toggled.connect(self._sync_route_scan_controls)
+        brand_scan_layout.addWidget(self.route_scan_checkbox)
+
+        route_limit_row = QHBoxLayout()
+        route_limit_row.addWidget(QLabel("Max extra routes"))
+        self.route_limit_spinbox = QSpinBox()
+        self.route_limit_spinbox.setRange(1, 10)
+        self.route_limit_spinbox.setValue(5)
+        self.route_limit_spinbox.setEnabled(False)
+        route_limit_row.addWidget(self.route_limit_spinbox)
+        route_limit_row.addStretch(1)
+        brand_scan_layout.addLayout(route_limit_row)
+
         actions_group = QGroupBox("Actions")
         actions_layout = QGridLayout(actions_group)
         actions_layout.setHorizontalSpacing(8)
@@ -193,6 +211,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(source_group)
         layout.addWidget(scope_group)
         layout.addWidget(output_group)
+        layout.addWidget(brand_scan_group)
         layout.addWidget(actions_group)
         layout.addStretch(1)
         return scroll_area
@@ -213,6 +232,9 @@ class MainWindow(QMainWindow):
         )
         if directory:
             self.output_dir_input.setText(directory)
+
+    def _sync_route_scan_controls(self, enabled: bool) -> None:
+        self.route_limit_spinbox.setEnabled(enabled)
 
     def _start_analysis(self) -> None:
         if self._analysis_running or self._download_running:
@@ -449,5 +471,7 @@ class MainWindow(QMainWindow):
             analyze_colors=self.colors_checkbox.isChecked(),
             analyze_copy=self.copy_checkbox.isChecked(),
             analyze_assets=self.assets_checkbox.isChecked(),
+            explore_site_routes=self.route_scan_checkbox.isChecked(),
+            max_route_pages=self.route_limit_spinbox.value(),
             zip_downloads=self.zip_checkbox.isChecked(),
         )

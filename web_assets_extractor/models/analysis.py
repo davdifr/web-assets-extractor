@@ -11,6 +11,8 @@ class AnalysisOptions:
     analyze_colors: bool = True
     analyze_copy: bool = True
     analyze_assets: bool = True
+    explore_site_routes: bool = False
+    max_route_pages: int = 5
     zip_downloads: bool = False
     timeout_ms: int = 30_000
 
@@ -20,6 +22,8 @@ class AnalysisOptions:
             "analyze_colors": self.analyze_colors,
             "analyze_copy": self.analyze_copy,
             "analyze_assets": self.analyze_assets,
+            "explore_site_routes": self.explore_site_routes,
+            "max_route_pages": self.max_route_pages,
             "zip_downloads": self.zip_downloads,
             "timeout_ms": self.timeout_ms,
         }
@@ -78,9 +82,14 @@ class ColorRecord:
 class TextSnippet:
     tag: str
     text: str
+    page_url: str | None = None
 
     def to_dict(self) -> dict[str, str]:
-        return {"tag": self.tag, "text": self.text}
+        return {
+            "tag": self.tag,
+            "text": self.text,
+            "page_url": self.page_url,
+        }
 
 
 @dataclass(slots=True)
@@ -88,9 +97,15 @@ class CTARecord:
     text: str
     url: str | None
     tag: str
+    page_url: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"text": self.text, "url": self.url, "tag": self.tag}
+        return {
+            "text": self.text,
+            "url": self.url,
+            "tag": self.tag,
+            "page_url": self.page_url,
+        }
 
 
 @dataclass(slots=True)
@@ -99,6 +114,7 @@ class AssetRecord:
     kind: str
     filename: str
     origin: str
+    page_url: str | None = None
     url: str | None = None
     mime_type: str | None = None
     alt_text: str | None = None
@@ -114,6 +130,7 @@ class AssetRecord:
             "kind": self.kind,
             "filename": self.filename,
             "origin": self.origin,
+            "page_url": self.page_url,
             "url": self.url,
             "mime_type": self.mime_type,
             "alt_text": self.alt_text,
@@ -166,6 +183,7 @@ class AnalysisResult:
     copy_blocks: list[TextSnippet] = field(default_factory=list)
     assets: list[AssetRecord] = field(default_factory=list)
     downloaded_assets: list[DownloadedAssetRecord] = field(default_factory=list)
+    scanned_pages: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -226,5 +244,6 @@ class AnalysisResult:
             "copy_blocks": [item.to_dict() for item in self.copy_blocks],
             "assets": [item.to_dict() for item in self.assets],
             "downloaded_assets": [item.to_dict() for item in self.downloaded_assets],
+            "scanned_pages": self.scanned_pages,
             "notes": self.notes,
         }

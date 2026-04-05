@@ -60,6 +60,14 @@ class OverviewTab(QWidget):
             )
             if enabled
         ) or "None"
+        scan_mode = (
+            f"Brand Scan, up to {result.options.max_route_pages} extra routes"
+            if result.options.explore_site_routes
+            else "Single page"
+        )
+        scanned_pages_html = "".join(
+            f"<li>{escape(page_url)}</li>" for page_url in result.scanned_pages
+        ) or f"<li>{escape(result.final_url)}</li>"
 
         stats_rows = "".join(
             f"<tr><td>{escape(label)}</td><td>{value}</td></tr>"
@@ -71,6 +79,7 @@ class OverviewTab(QWidget):
                 ("Copy blocks", result.copy_blocks_count),
                 ("Assets", result.assets_count),
                 ("Downloaded assets", result.downloaded_assets_count),
+                ("Pages scanned", max(1, len(result.scanned_pages))),
                 ("Word count", result.word_count),
                 ("Duration", f"{result.duration_ms} ms"),
             )
@@ -92,7 +101,10 @@ class OverviewTab(QWidget):
             </table>
             <h4>Overview</h4>
             <p>Scope: {escape(options_text)}</p>
+            <p>Scan mode: {escape(scan_mode)}</p>
             <table cellspacing="0" cellpadding="4">{stats_rows}</table>
+            <h4>Scanned Pages</h4>
+            <ul>{scanned_pages_html}</ul>
             <h4>Notes</h4>
             <ul>{notes_html}</ul>
             """
@@ -166,9 +178,9 @@ class CopyTab(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._tabs = QTabWidget()
-        self._headlines_table = self._build_table(["Tag", "Headline"], stretch_column=1)
-        self._cta_table = self._build_table(["Text", "URL", "Tag"], stretch_column=1)
-        self._copy_blocks_table = self._build_table(["Tag", "Copy Block"], stretch_column=1)
+        self._headlines_table = self._build_table(["Tag", "Headline", "Page"], stretch_columns={1, 2})
+        self._cta_table = self._build_table(["Text", "URL", "Tag", "Page"], stretch_columns={0, 1, 3})
+        self._copy_blocks_table = self._build_table(["Tag", "Copy Block", "Page"], stretch_columns={1, 2})
 
         self._tabs.addTab(self._headlines_table, "Headlines")
         self._tabs.addTab(self._cta_table, "CTA")
@@ -192,6 +204,7 @@ class CopyTab(QWidget):
         for row, item in enumerate(result.headlines):
             self._headlines_table.setItem(row, 0, QTableWidgetItem(item.tag))
             self._headlines_table.setItem(row, 1, QTableWidgetItem(item.text))
+            self._headlines_table.setItem(row, 2, QTableWidgetItem(item.page_url or result.final_url))
         self._headlines_table.resizeRowsToContents()
 
     def _populate_ctas(self, result: AnalysisResult) -> None:
@@ -200,6 +213,7 @@ class CopyTab(QWidget):
             self._cta_table.setItem(row, 0, QTableWidgetItem(item.text))
             self._cta_table.setItem(row, 1, QTableWidgetItem(item.url or ""))
             self._cta_table.setItem(row, 2, QTableWidgetItem(item.tag))
+            self._cta_table.setItem(row, 3, QTableWidgetItem(item.page_url or result.final_url))
         self._cta_table.resizeRowsToContents()
 
     def _populate_copy_blocks(self, result: AnalysisResult) -> None:
@@ -207,16 +221,17 @@ class CopyTab(QWidget):
         for row, item in enumerate(result.copy_blocks):
             self._copy_blocks_table.setItem(row, 0, QTableWidgetItem(item.tag))
             self._copy_blocks_table.setItem(row, 1, QTableWidgetItem(item.text))
+            self._copy_blocks_table.setItem(row, 2, QTableWidgetItem(item.page_url or result.final_url))
         self._copy_blocks_table.resizeRowsToContents()
 
-    def _build_table(self, labels: list[str], stretch_column: int) -> QTableWidget:
+    def _build_table(self, labels: list[str], stretch_columns: set[int]) -> QTableWidget:
         table = QTableWidget(0, len(labels))
         table.setHorizontalHeaderLabels(labels)
         table.verticalHeader().setVisible(False)
         for index in range(len(labels)):
             mode = (
                 QHeaderView.ResizeMode.Stretch
-                if index == stretch_column
+                if index in stretch_columns
                 else QHeaderView.ResizeMode.ResizeToContents
             )
             table.horizontalHeader().setSectionResizeMode(index, mode)
@@ -239,9 +254,9 @@ class AssetsTab(QWidget):
         self._video_player = QMediaPlayer(self)
         self._video_player.setAudioOutput(self._video_audio_output)
 
-        self._table = QTableWidget(0, 7)
+        self._table = QTableWidget(0, 8)
         self._table.setHorizontalHeaderLabels(
-            ["Select", "ID", "Type", "Filename", "Source", "Origin", "Status"]
+            ["Select", "ID", "Type", "Filename", "Source", "Origin", "Page", "Status"]
         )
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
@@ -249,7 +264,8 @@ class AssetsTab(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -391,9 +407,10 @@ class AssetsTab(QWidget):
             self._table.setItem(row, 3, QTableWidgetItem(asset.filename))
             self._table.setItem(row, 4, QTableWidgetItem(asset.url or "inline SVG"))
             self._table.setItem(row, 5, QTableWidgetItem(asset.origin))
+            self._table.setItem(row, 6, QTableWidgetItem(asset.page_url or result.final_url))
             self._table.setItem(
                 row,
-                6,
+                7,
                 QTableWidgetItem("Downloaded" if asset.downloaded else "Available"),
             )
         self._table.blockSignals(False)
@@ -507,6 +524,7 @@ class AssetsTab(QWidget):
             f"Type: {asset.kind}",
             f"Filename: {asset.filename}",
             f"Origin: {asset.origin}",
+            f"Page: {asset.page_url or 'N/A'}",
             f"Status: {'Downloaded' if asset.downloaded else 'Available'}",
         ]
         if asset.url:

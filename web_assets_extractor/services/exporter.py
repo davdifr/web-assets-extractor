@@ -21,6 +21,11 @@ class ReportExporter:
         destination.write_text(self.build_markdown(result), encoding="utf-8")
 
     def build_markdown(self, result: AnalysisResult) -> str:
+        scan_mode = (
+            f"Brand Scan (up to {result.options.max_route_pages} extra routes)"
+            if result.options.explore_site_routes
+            else "Single page"
+        )
         lines: list[str] = [
             "# Web Assets Extractor Report",
             "",
@@ -34,7 +39,9 @@ class ReportExporter:
             f"- Output Directory: {result.paths.root_dir}",
             "",
             "## Overview",
+            f"- Scan Mode: {scan_mode}",
             f"- Analysis Duration: {result.duration_ms} ms",
+            f"- Pages Scanned: {max(1, len(result.scanned_pages))}",
             f"- Word Count: {result.word_count}",
             f"- Fonts Detected: {result.fonts_count}",
             f"- Colors Detected: {result.colors_count}",
@@ -44,8 +51,14 @@ class ReportExporter:
             f"- Assets Detected: {result.assets_count}",
             f"- Downloaded Assets: {result.downloaded_assets_count}",
             "",
-            "## Fonts",
+            "## Scanned Pages",
         ]
+
+        lines.extend(self._scanned_pages_section(result))
+        lines.extend([
+            "",
+            "## Fonts",
+        ])
 
         lines.extend(self._fonts_section(result))
         lines.extend(["", "## Color Palette"])
@@ -86,6 +99,10 @@ class ReportExporter:
             )
         return lines
 
+    def _scanned_pages_section(self, result: AnalysisResult) -> list[str]:
+        pages = result.scanned_pages or [result.final_url]
+        return [f"- {page_url}" for page_url in pages]
+
     def _headlines_section(self, result: AnalysisResult) -> list[str]:
         if not result.options.analyze_copy:
             return ["Analysis skipped."]
@@ -93,6 +110,11 @@ class ReportExporter:
             return ["No headline candidates detected."]
         return [
             f"{index}. `{headline.tag}` {headline.text}"
+            + (
+                f" _(Page: {headline.page_url})_"
+                if headline.page_url
+                else ""
+            )
             for index, headline in enumerate(result.headlines, start=1)
         ]
 
@@ -101,10 +123,19 @@ class ReportExporter:
             return ["Analysis skipped."]
         if not result.ctas:
             return ["No CTA candidates detected."]
-        lines = ["| Text | URL | Tag |", "| --- | --- | --- |"]
+        lines = ["| Text | URL | Tag | Page |", "| --- | --- | --- | --- |"]
         for cta in result.ctas:
             lines.append(
-                f"| {self._escape_table(cta.text)} | {self._escape_table(cta.url or 'N/A')} | {cta.tag} |"
+                "| "
+                + " | ".join(
+                    [
+                        self._escape_table(cta.text),
+                        self._escape_table(cta.url or "N/A"),
+                        cta.tag,
+                        self._escape_table(cta.page_url or "N/A"),
+                    ]
+                )
+                + " |"
             )
         return lines
 
@@ -115,6 +146,11 @@ class ReportExporter:
             return ["No copy blocks detected."]
         return [
             f"{index}. `{block.tag}` {block.text}"
+            + (
+                f" _(Page: {block.page_url})_"
+                if block.page_url
+                else ""
+            )
             for index, block in enumerate(result.copy_blocks, start=1)
         ]
 
@@ -124,8 +160,8 @@ class ReportExporter:
         if not result.assets:
             return ["No assets detected."]
         lines = [
-            "| ID | Type | Filename | Source | Origin | Downloaded |",
-            "| --- | --- | --- | --- | --- | --- |",
+            "| ID | Type | Filename | Source | Origin | Page | Downloaded |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
         ]
         for asset in result.assets:
             source = asset.url or "inline content"
@@ -138,6 +174,7 @@ class ReportExporter:
                         self._escape_table(asset.filename),
                         self._escape_table(source),
                         self._escape_table(asset.origin),
+                        self._escape_table(asset.page_url or "N/A"),
                         "Yes" if asset.downloaded else "No",
                     ]
                 )

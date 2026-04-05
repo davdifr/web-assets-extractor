@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -63,18 +63,46 @@ class RenderedMediaResponse:
 
 
 @dataclass(slots=True)
+class RenderedLinkCandidate:
+    url: str
+    text: str
+    context: str
+
+
+@dataclass(slots=True)
 class RenderedPageSnapshot:
     html: str
     final_url: str
     media_responses: list[RenderedMediaResponse]
+    internal_links: list[RenderedLinkCandidate] = field(default_factory=list)
     headlines: list[TextSnippet] = field(default_factory=list)
     ctas: list[CTARecord] = field(default_factory=list)
     copy_blocks: list[TextSnippet] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class PageAnalysisSnapshot:
+    requested_url: str
+    final_url: str
+    page_title: str
+    page_description: str | None
+    status_code: int | None
+    word_count: int
+    html: str
+    fonts: list[FontRecord] = field(default_factory=list)
+    colors: list[ColorRecord] = field(default_factory=list)
+    headlines: list[TextSnippet] = field(default_factory=list)
+    ctas: list[CTARecord] = field(default_factory=list)
+    copy_blocks: list[TextSnippet] = field(default_factory=list)
+    assets: list[AssetRecord] = field(default_factory=list)
+    rendered_snapshot: RenderedPageSnapshot | None = None
+    notes: list[str] = field(default_factory=list)
+
+
 class WebAnalyzer:
     MAX_STYLESHEETS = 12
     MAX_STYLESHEET_CHARS = 500_000
+    MAX_BRAND_SCAN_ROUTES = 10
     UI_NOISE_TEXTS = {
         "x",
         "×",
@@ -113,6 +141,86 @@ class WebAnalyzer:
         "sidenav",
         "drawer",
     )
+    NON_PAGE_ROUTE_SUFFIXES = (
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".avif",
+        ".svg",
+        ".mp4",
+        ".webm",
+        ".mov",
+        ".mp3",
+        ".m4a",
+        ".wav",
+        ".pdf",
+        ".zip",
+        ".xml",
+        ".json",
+        ".css",
+        ".js",
+    )
+    ROUTE_EXCLUDE_TOKENS = (
+        "login",
+        "logout",
+        "sign-in",
+        "signin",
+        "sign-up",
+        "signup",
+        "register",
+        "account",
+        "checkout",
+        "cart",
+        "search",
+        "privacy",
+        "cookie",
+        "policy",
+        "legal",
+        "terms",
+        "condition",
+        "feed",
+        "rss",
+        "admin",
+        "wp-admin",
+        "wp-json",
+        "mailto:",
+        "tel:",
+    )
+    ROUTE_KEYWORD_BOOSTS = {
+        "about": 5,
+        "about-us": 5,
+        "chi-siamo": 6,
+        "company": 4,
+        "team": 4,
+        "story": 3,
+        "mission": 4,
+        "metodo": 5,
+        "method": 4,
+        "come-funziona": 7,
+        "how-it-works": 7,
+        "servizi": 6,
+        "services": 6,
+        "solutions": 5,
+        "prodotti": 5,
+        "products": 5,
+        "percorsi": 5,
+        "wellbeing": 4,
+        "benessere": 5,
+        "coaching": 4,
+        "contact": 4,
+        "contatti": 4,
+        "partner": 4,
+    }
+    ROUTE_CONTEXT_SCORES = {
+        "nav": 6,
+        "header": 5,
+        "main": 4,
+        "footer": 2,
+        "other": 0,
+    }
 
     def __init__(self, exporter: ReportExporter) -> None:
         self._exporter = exporter
@@ -137,143 +245,99 @@ class WebAnalyzer:
     ) -> AnalysisResult:
         source_url = normalize_url(url)
         paths = AnalysisPaths(*make_analysis_paths(output_root, source_url))
-        notes: list[str] = []
         start_time = perf_counter()
         timeout_seconds = max(5, int(options.timeout_ms / 1000))
-
-        self._progress(progress_callback, "Fetching page HTML")
-        response, used_insecure_ssl = self._fetch_response(source_url, timeout_seconds)
-        html = response.text or ""
-        final_url = response.url or source_url
-        status_code = response.status_code
-
-        if used_insecure_ssl:
-            notes.append(
-                "SSL certificate verification failed for the main request. "
-                "Extraction continued without certificate verification on this device."
-            )
-        if status_code >= 400:
-            notes.append(
-                f"The server returned HTTP {status_code}. Extraction continued using the available HTML response."
-            )
-
-        page_soup = BeautifulSoup(html, "html.parser")
-        stylesheet_soup = BeautifulSoup(html, "html.parser")
-        analysis_soup = BeautifulSoup(html, "html.parser")
-        page_title = self._extract_page_title(page_soup)
-        page_description = self._extract_page_description(page_soup)
-
-        stylesheets: list[StylesheetContent] = []
-        if options.analyze_fonts or options.analyze_colors or options.analyze_assets:
-            self._progress(progress_callback, "Collecting inline and linked stylesheets")
-            stylesheets = self._collect_stylesheets(
-                stylesheet_soup,
-                final_url,
-                timeout_seconds,
-                progress_callback,
-                notes,
-            )
-
-        self._remove_non_content_nodes(analysis_soup)
-        word_count = self._count_words(analysis_soup)
-        rendered_snapshot: RenderedPageSnapshot | None = None
-        rendered_soup: BeautifulSoup | None = None
-        rendered_analysis_soup: BeautifulSoup | None = None
-        rendered_snapshot_used = False
-        rendered_usage_labels: list[str] = []
-
-        if options.analyze_assets or options.analyze_copy:
-            rendered_snapshot = self._collect_rendered_asset_snapshot(
-                final_url,
-                options.timeout_ms,
-                progress_callback,
-                notes,
-            )
-            if rendered_snapshot is not None:
-                rendered_snapshot_used = True
-                rendered_soup = BeautifulSoup(rendered_snapshot.html, "html.parser")
-                rendered_analysis_soup = BeautifulSoup(rendered_snapshot.html, "html.parser")
-                self._remove_non_content_nodes(rendered_analysis_soup)
-
-        self._progress(progress_callback, "Extracting requested data")
-        fonts = self._build_fonts(analysis_soup, stylesheets) if options.analyze_fonts else []
-        colors = self._build_colors(analysis_soup, stylesheets) if options.analyze_colors else []
-        headlines, ctas, copy_blocks = (
-            self._build_copy_sections(analysis_soup, final_url)
-            if options.analyze_copy
-            else ([], [], [])
+        primary_page = self._analyze_page_capture(
+            source_url,
+            options,
+            timeout_seconds,
+            progress_callback,
+            capture_route_links=options.explore_site_routes,
         )
-        if options.analyze_copy and rendered_analysis_soup is not None and rendered_snapshot is not None:
-            rendered_copy_sections = (
-                list(rendered_snapshot.headlines),
-                list(rendered_snapshot.ctas),
-                list(rendered_snapshot.copy_blocks),
-            )
-            if not any(rendered_copy_sections):
-                rendered_copy_sections = self._build_copy_sections(
-                    rendered_analysis_soup,
-                    rendered_snapshot.final_url,
-                )
-            merged_headlines = self._merge_text_snippets(headlines, rendered_copy_sections[0])
-            merged_ctas = self._merge_cta_records(ctas, rendered_copy_sections[1])
-            merged_copy_blocks = self._merge_text_snippets(copy_blocks, rendered_copy_sections[2])
-            additional_headlines = max(0, len(merged_headlines) - len(headlines))
-            additional_ctas = max(0, len(merged_ctas) - len(ctas))
-            additional_copy_blocks = max(0, len(merged_copy_blocks) - len(copy_blocks))
-            headlines, ctas, copy_blocks = merged_headlines, merged_ctas, merged_copy_blocks
-            if additional_headlines or additional_ctas or additional_copy_blocks:
-                rendered_usage_labels.append("copy")
-                notes.append(
-                    "Rendered browser snapshot inspected for copy extraction. "
-                    f"Added {additional_headlines} headlines, {additional_ctas} CTA candidates, "
-                    f"and {additional_copy_blocks} copy blocks."
-                )
-        assets: list[AssetRecord] = []
-        if options.analyze_assets:
-            static_assets = self._extract_assets(analysis_soup, html, final_url, stylesheets)
-            assets = list(static_assets)
-            if rendered_snapshot is not None and rendered_soup is not None:
-                rendered_assets = self._extract_assets(
-                    rendered_soup,
-                    rendered_snapshot.html,
-                    rendered_snapshot.final_url,
-                    stylesheets,
-                )
-                network_assets = self._extract_network_assets(
-                    rendered_snapshot.media_responses,
-                    rendered_snapshot.final_url,
-                )
-                assets = self._merge_assets(rendered_assets, network_assets, static_assets)
+        notes = list(primary_page.notes)
+        fonts = list(primary_page.fonts)
+        colors = list(primary_page.colors)
+        headlines = list(primary_page.headlines)
+        ctas = list(primary_page.ctas)
+        copy_blocks = list(primary_page.copy_blocks)
+        assets = list(primary_page.assets)
+        word_count = primary_page.word_count
+        scanned_pages = [primary_page.final_url]
 
-                additional_assets = max(0, len(assets) - len(static_assets))
+        if options.explore_site_routes:
+            if not (options.analyze_copy or options.analyze_assets):
                 notes.append(
-                    "Rendered browser snapshot inspected for asset extraction. "
-                    f"Added {additional_assets} rendered/network asset candidates."
+                    "Brand scan route exploration was skipped because only fonts and colors were selected."
                 )
-                rendered_usage_labels.append("assets")
-        if rendered_snapshot_used:
-            usage_summary = ", ".join(rendered_usage_labels) if rendered_usage_labels else "rendered content"
-            notes.append(
-                "Analysis completed with HTTP extraction plus rendered browser inspection "
-                f"for {usage_summary}."
-            )
-        else:
-            notes.append("Analysis completed with direct HTTP extraction; no rendered browser snapshot was used.")
-        if stylesheets:
-            external_stylesheet_count = sum(1 for sheet in stylesheets if sheet.source_type == "external")
-            inline_stylesheet_count = sum(1 for sheet in stylesheets if sheet.source_type == "inline")
-            notes.append(
-                f"Stylesheets inspected: {inline_stylesheet_count} inline, {external_stylesheet_count} external."
-            )
+            else:
+                route_limit = max(1, min(options.max_route_pages, self.MAX_BRAND_SCAN_ROUTES))
+                discovered_routes = self._discover_site_routes(
+                    primary_page.final_url,
+                    primary_page.html,
+                    primary_page.rendered_snapshot,
+                    route_limit,
+                )
+                if discovered_routes:
+                    notes.append(
+                        f"Brand scan selected {len(discovered_routes)} additional internal routes to inspect."
+                    )
+                else:
+                    notes.append("Brand scan did not find any additional internal routes worth exploring.")
+
+                for index, route_url in enumerate(discovered_routes, start=1):
+                    if progress_callback:
+                        progress_callback(
+                            ProgressUpdate(
+                                message=f"Brand Scan route {index}/{len(discovered_routes)}: {route_url}",
+                                current=index - 1,
+                                total=len(discovered_routes),
+                                indeterminate=False,
+                            )
+                        )
+                    try:
+                        route_page = self._analyze_page_capture(
+                            route_url,
+                            options,
+                            timeout_seconds,
+                            progress_callback,
+                            note_prefix=f"Route {route_url}: ",
+                            progress_label=f"route {index}/{len(discovered_routes)}",
+                            analyze_fonts_and_colors=False,
+                        )
+                    except Exception as exc:
+                        notes.append(f"Route {route_url}: scan failed and was skipped: {exc}")
+                        continue
+
+                    notes.extend(route_page.notes)
+                    scanned_pages = self._merge_page_urls(scanned_pages, [route_page.final_url])
+                    word_count += route_page.word_count
+                    if options.analyze_copy:
+                        headlines = self._merge_text_snippets(headlines, route_page.headlines)
+                        ctas = self._merge_cta_records(ctas, route_page.ctas)
+                        copy_blocks = self._merge_text_snippets(copy_blocks, route_page.copy_blocks)
+                    if options.analyze_assets:
+                        assets = self._merge_assets(assets, route_page.assets)
+                    if progress_callback:
+                        progress_callback(
+                            ProgressUpdate(
+                                message=f"Brand Scan route {index}/{len(discovered_routes)} scanned",
+                                current=index,
+                                total=len(discovered_routes),
+                                indeterminate=False,
+                            )
+                        )
+                if discovered_routes:
+                    notes.append(f"Brand scan explored {len(scanned_pages)} pages total.")
+
         notes.append(f"Initial reports written to {paths.root_dir}")
 
         duration_ms = int((perf_counter() - start_time) * 1000)
         result = AnalysisResult(
             source_url=source_url,
-            final_url=final_url,
-            page_title=page_title,
-            page_description=page_description,
-            status_code=status_code,
+            final_url=primary_page.final_url,
+            page_title=primary_page.page_title,
+            page_description=primary_page.page_description,
+            status_code=primary_page.status_code,
             analysed_at=self._timestamp(),
             duration_ms=duration_ms,
             word_count=word_count,
@@ -285,6 +349,7 @@ class WebAnalyzer:
             ctas=ctas,
             copy_blocks=copy_blocks,
             assets=assets,
+            scanned_pages=scanned_pages,
             notes=notes,
         )
 
@@ -315,6 +380,215 @@ class WebAnalyzer:
                 raise ValueError(f"Could not fetch {url}: {exc}") from exc
         except requests.RequestException as exc:
             raise ValueError(f"Could not fetch {url}: {exc}") from exc
+
+    def _analyze_page_capture(
+        self,
+        url: str,
+        options: AnalysisOptions,
+        timeout_seconds: int,
+        progress_callback: ProgressCallback,
+        *,
+        note_prefix: str | None = None,
+        progress_label: str | None = None,
+        analyze_fonts_and_colors: bool = True,
+        capture_route_links: bool = False,
+    ) -> PageAnalysisSnapshot:
+        fetch_message = "Fetching page HTML"
+        if progress_label:
+            fetch_message = f"Fetching {progress_label}"
+        self._progress(progress_callback, fetch_message)
+
+        response, used_insecure_ssl = self._fetch_response(url, timeout_seconds)
+        html = response.text or ""
+        final_url = response.url or url
+        status_code = response.status_code
+        page_notes: list[str] = []
+
+        if used_insecure_ssl:
+            page_notes.append(
+                self._format_note(
+                    note_prefix,
+                    "SSL certificate verification failed for the page request. "
+                    "Extraction continued without certificate verification on this device.",
+                )
+            )
+        if status_code >= 400:
+            page_notes.append(
+                self._format_note(
+                    note_prefix,
+                    f"The server returned HTTP {status_code}. Extraction continued using the available HTML response.",
+                )
+            )
+
+        page_soup = BeautifulSoup(html, "html.parser")
+        stylesheet_soup = BeautifulSoup(html, "html.parser")
+        analysis_soup = BeautifulSoup(html, "html.parser")
+        page_title = self._extract_page_title(page_soup)
+        page_description = self._extract_page_description(page_soup)
+
+        stylesheets: list[StylesheetContent] = []
+        should_collect_stylesheets = options.analyze_assets or (
+            analyze_fonts_and_colors and (options.analyze_fonts or options.analyze_colors)
+        )
+        if should_collect_stylesheets:
+            stylesheet_message = "Collecting inline and linked stylesheets"
+            if progress_label:
+                stylesheet_message = f"Collecting stylesheets for {progress_label}"
+            self._progress(progress_callback, stylesheet_message)
+            stylesheets = self._collect_stylesheets(
+                stylesheet_soup,
+                final_url,
+                timeout_seconds,
+                progress_callback,
+                page_notes,
+            )
+
+        self._remove_non_content_nodes(analysis_soup)
+        word_count = self._count_words(analysis_soup)
+        rendered_snapshot: RenderedPageSnapshot | None = None
+        rendered_soup: BeautifulSoup | None = None
+        rendered_analysis_soup: BeautifulSoup | None = None
+        rendered_snapshot_used = False
+        rendered_usage_labels: list[str] = []
+
+        if options.analyze_assets or options.analyze_copy or capture_route_links:
+            rendered_snapshot = self._collect_rendered_asset_snapshot(
+                final_url,
+                options.timeout_ms,
+                progress_callback,
+                page_notes,
+            )
+            if rendered_snapshot is not None:
+                rendered_snapshot_used = True
+                rendered_soup = BeautifulSoup(rendered_snapshot.html, "html.parser")
+                rendered_analysis_soup = BeautifulSoup(rendered_snapshot.html, "html.parser")
+                self._remove_non_content_nodes(rendered_analysis_soup)
+
+        extract_message = "Extracting requested data"
+        if progress_label:
+            extract_message = f"Extracting data for {progress_label}"
+        self._progress(progress_callback, extract_message)
+        fonts = (
+            self._build_fonts(analysis_soup, stylesheets)
+            if analyze_fonts_and_colors and options.analyze_fonts
+            else []
+        )
+        colors = (
+            self._build_colors(analysis_soup, stylesheets)
+            if analyze_fonts_and_colors and options.analyze_colors
+            else []
+        )
+        headlines, ctas, copy_blocks = (
+            self._build_copy_sections(analysis_soup, final_url)
+            if options.analyze_copy
+            else ([], [], [])
+        )
+        if options.analyze_copy and rendered_analysis_soup is not None and rendered_snapshot is not None:
+            rendered_copy_sections = (
+                list(rendered_snapshot.headlines),
+                list(rendered_snapshot.ctas),
+                list(rendered_snapshot.copy_blocks),
+            )
+            if not any(rendered_copy_sections):
+                rendered_copy_sections = self._build_copy_sections(
+                    rendered_analysis_soup,
+                    rendered_snapshot.final_url,
+                )
+            merged_headlines = self._merge_text_snippets(headlines, rendered_copy_sections[0])
+            merged_ctas = self._merge_cta_records(ctas, rendered_copy_sections[1])
+            merged_copy_blocks = self._merge_text_snippets(copy_blocks, rendered_copy_sections[2])
+            additional_headlines = max(0, len(merged_headlines) - len(headlines))
+            additional_ctas = max(0, len(merged_ctas) - len(ctas))
+            additional_copy_blocks = max(0, len(merged_copy_blocks) - len(copy_blocks))
+            headlines, ctas, copy_blocks = merged_headlines, merged_ctas, merged_copy_blocks
+            if additional_headlines or additional_ctas or additional_copy_blocks:
+                rendered_usage_labels.append("copy")
+                page_notes.append(
+                    self._format_note(
+                        note_prefix,
+                        "Rendered browser snapshot inspected for copy extraction. "
+                        f"Added {additional_headlines} headlines, {additional_ctas} CTA candidates, "
+                        f"and {additional_copy_blocks} copy blocks.",
+                    )
+                )
+
+        assets: list[AssetRecord] = []
+        if options.analyze_assets:
+            static_assets = self._extract_assets(
+                analysis_soup,
+                html,
+                final_url,
+                stylesheets,
+                page_url=final_url,
+            )
+            assets = list(static_assets)
+            if rendered_snapshot is not None and rendered_soup is not None:
+                rendered_assets = self._extract_assets(
+                    rendered_soup,
+                    rendered_snapshot.html,
+                    rendered_snapshot.final_url,
+                    stylesheets,
+                    page_url=rendered_snapshot.final_url,
+                )
+                network_assets = self._extract_network_assets(
+                    rendered_snapshot.media_responses,
+                    rendered_snapshot.final_url,
+                    page_url=rendered_snapshot.final_url,
+                )
+                assets = self._merge_assets(rendered_assets, network_assets, static_assets)
+
+                additional_assets = max(0, len(assets) - len(static_assets))
+                page_notes.append(
+                    self._format_note(
+                        note_prefix,
+                        "Rendered browser snapshot inspected for asset extraction. "
+                        f"Added {additional_assets} rendered/network asset candidates.",
+                    )
+                )
+                rendered_usage_labels.append("assets")
+        if rendered_snapshot_used:
+            usage_summary = ", ".join(rendered_usage_labels) if rendered_usage_labels else "rendered content"
+            page_notes.append(
+                self._format_note(
+                    note_prefix,
+                    "Analysis completed with HTTP extraction plus rendered browser inspection "
+                    f"for {usage_summary}.",
+                )
+            )
+        else:
+            page_notes.append(
+                self._format_note(
+                    note_prefix,
+                    "Analysis completed with direct HTTP extraction; no rendered browser snapshot was used.",
+                )
+            )
+        if stylesheets:
+            external_stylesheet_count = sum(1 for sheet in stylesheets if sheet.source_type == "external")
+            inline_stylesheet_count = sum(1 for sheet in stylesheets if sheet.source_type == "inline")
+            page_notes.append(
+                self._format_note(
+                    note_prefix,
+                    f"Stylesheets inspected: {inline_stylesheet_count} inline, {external_stylesheet_count} external.",
+                )
+            )
+
+        return PageAnalysisSnapshot(
+            requested_url=url,
+            final_url=final_url,
+            page_title=page_title,
+            page_description=page_description,
+            status_code=status_code,
+            word_count=word_count,
+            html=html,
+            fonts=fonts,
+            colors=colors,
+            headlines=headlines,
+            ctas=ctas,
+            copy_blocks=copy_blocks,
+            assets=assets,
+            rendered_snapshot=rendered_snapshot,
+            notes=page_notes,
+        )
 
     def _collect_stylesheets(
         self,
@@ -482,7 +756,7 @@ class WebAnalyzer:
             if not text or self._is_low_signal_heading(text) or text in seen_headlines:
                 continue
             seen_headlines.add(text)
-            headlines.append(TextSnippet(tag=element.name or "h1", text=text))
+            headlines.append(TextSnippet(tag=element.name or "h1", text=text, page_url=final_url))
             if len(headlines) >= 20:
                 break
 
@@ -503,7 +777,7 @@ class WebAnalyzer:
                 continue
 
             seen_ctas.add(key)
-            ctas.append(CTARecord(text=text, url=href, tag=element.name or "button"))
+            ctas.append(CTARecord(text=text, url=href, tag=element.name or "button", page_url=final_url))
             if len(ctas) >= 30:
                 break
 
@@ -519,7 +793,7 @@ class WebAnalyzer:
                 continue
 
             seen_copy_blocks.add(key)
-            copy_blocks.append(TextSnippet(tag=element.name or "p", text=text))
+            copy_blocks.append(TextSnippet(tag=element.name or "p", text=text, page_url=final_url))
             if len(copy_blocks) >= 60:
                 break
 
@@ -531,6 +805,8 @@ class WebAnalyzer:
         html: str,
         base_url: str,
         stylesheets: list[StylesheetContent],
+        *,
+        page_url: str | None = None,
     ) -> list[AssetRecord]:
         assets: list[AssetRecord] = []
         seen: set[str] = set()
@@ -591,6 +867,7 @@ class WebAnalyzer:
                     kind=inferred_kind,
                     filename=filename,
                     origin=origin,
+                    page_url=page_url,
                     url=resolved_url,
                     mime_type=mime_type,
                     alt_text=alt_text,
@@ -821,10 +1098,12 @@ class WebAnalyzer:
                         )
                     page.wait_for_timeout(1200)
                     rendered_copy_sections = self._extract_rendered_copy_sections(page, page.url)
+                    rendered_internal_links = self._extract_rendered_internal_links(page, page.url)
                     return RenderedPageSnapshot(
                         html=page.content(),
                         final_url=page.url,
                         media_responses=list(media_responses),
+                        internal_links=rendered_internal_links,
                         headlines=rendered_copy_sections[0],
                         ctas=rendered_copy_sections[1],
                         copy_blocks=rendered_copy_sections[2],
@@ -926,6 +1205,8 @@ class WebAnalyzer:
         self,
         responses: list[RenderedMediaResponse],
         base_url: str,
+        *,
+        page_url: str | None = None,
     ) -> list[AssetRecord]:
         assets: list[AssetRecord] = []
         seen_urls: set[str] = set()
@@ -955,6 +1236,7 @@ class WebAnalyzer:
                     kind=inferred_kind,
                     filename=filename,
                     origin="rendered network response",
+                    page_url=page_url,
                     url=resolved_url,
                     mime_type=response.content_type,
                 )
@@ -1122,7 +1404,11 @@ class WebAnalyzer:
             return ([], [], [])
 
         headlines = [
-            TextSnippet(tag=str(item.get("tag") or "h1"), text=str(item.get("text") or ""))
+            TextSnippet(
+                tag=str(item.get("tag") or "h1"),
+                text=str(item.get("text") or ""),
+                page_url=final_url,
+            )
             for item in raw_sections.get("headlines", [])
             if isinstance(item, dict) and item.get("text")
         ]
@@ -1131,16 +1417,279 @@ class WebAnalyzer:
                 text=str(item.get("text") or ""),
                 url=str(item.get("url")) if item.get("url") else None,
                 tag=str(item.get("tag") or "button"),
+                page_url=final_url,
             )
             for item in raw_sections.get("ctas", [])
             if isinstance(item, dict) and item.get("text")
         ]
         copy_blocks = [
-            TextSnippet(tag=str(item.get("tag") or "p"), text=str(item.get("text") or ""))
+            TextSnippet(
+                tag=str(item.get("tag") or "p"),
+                text=str(item.get("text") or ""),
+                page_url=final_url,
+            )
             for item in raw_sections.get("copyBlocks", [])
             if isinstance(item, dict) and item.get("text")
         ]
         return (headlines, ctas, copy_blocks)
+
+    def _extract_rendered_internal_links(
+        self,
+        page: object,
+        final_url: str,
+    ) -> list[RenderedLinkCandidate]:
+        raw_links = getattr(page, "evaluate")(
+            """
+() => {
+  const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+  const seen = new Set();
+  const links = [];
+
+  const attributeText = element => [
+    element?.getAttribute?.('id') || '',
+    element?.getAttribute?.('class') || '',
+    element?.getAttribute?.('aria-label') || ''
+  ].join(' ').toLowerCase();
+
+  const contextFor = element => {
+    let current = element;
+    while (current) {
+      const tagName = (current.tagName || '').toLowerCase();
+      if (tagName === 'nav') return 'nav';
+      if (tagName === 'header') return 'header';
+      if (tagName === 'main') return 'main';
+      if (tagName === 'footer') return 'footer';
+      const attrs = attributeText(current);
+      if (attrs.includes('menu') || attrs.includes('navbar') || attrs.includes('sidenav')) {
+        return 'nav';
+      }
+      current = current.parentElement || current.host || null;
+    }
+    return 'other';
+  };
+
+  const pushLink = element => {
+    const rawHref = element.getAttribute?.('href') || '';
+    if (!rawHref || rawHref.startsWith('#') || rawHref.startsWith('mailto:') || rawHref.startsWith('tel:') || rawHref.startsWith('javascript:')) {
+      return;
+    }
+    let href = rawHref;
+    try {
+      href = new URL(rawHref, document.baseURI).href;
+    } catch (_error) {
+      return;
+    }
+    const text = normalize(
+      element.innerText ||
+      element.textContent ||
+      element.getAttribute?.('aria-label') ||
+      element.getAttribute?.('title') ||
+      ''
+    );
+    const context = contextFor(element);
+    const key = `${href}|${context}|${text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    links.push({ url: href, text, context });
+  };
+
+  const walk = root => {
+    if (!root || !root.querySelectorAll) return;
+    for (const element of root.querySelectorAll('a[href]')) pushLink(element);
+    for (const element of root.querySelectorAll('*')) {
+      if (element.shadowRoot) walk(element.shadowRoot);
+    }
+  };
+
+  walk(document);
+  return links;
+}
+            """
+        )
+        if not isinstance(raw_links, list):
+            return []
+        links: list[RenderedLinkCandidate] = []
+        seen_urls: set[str] = set()
+        for item in raw_links:
+            if not isinstance(item, dict):
+                continue
+            resolved_url = absolutize_url(final_url, str(item.get("url") or ""))
+            if not resolved_url or resolved_url in seen_urls:
+                continue
+            seen_urls.add(resolved_url)
+            links.append(
+                RenderedLinkCandidate(
+                    url=resolved_url,
+                    text=self._clean_extracted_text(str(item.get("text") or "")),
+                    context=str(item.get("context") or "other"),
+                )
+            )
+        return links
+
+    def _discover_site_routes(
+        self,
+        root_url: str,
+        html: str,
+        rendered_snapshot: RenderedPageSnapshot | None,
+        max_routes: int,
+    ) -> list[str]:
+        soup = BeautifulSoup(html, "html.parser")
+        candidates = self._extract_static_internal_links(soup, root_url)
+        if rendered_snapshot is not None:
+            candidates.extend(rendered_snapshot.internal_links)
+
+        scored_routes: dict[str, tuple[int, str]] = {}
+        root_canonical = self._canonicalize_route_url(root_url, root_url)
+        for candidate in candidates:
+            canonical_url = self._canonicalize_route_url(root_url, candidate.url)
+            if not canonical_url or canonical_url == root_canonical:
+                continue
+            score = self._score_route_candidate(root_url, canonical_url, candidate.text, candidate.context)
+            if score <= 0:
+                continue
+            previous = scored_routes.get(canonical_url)
+            if previous is None or score > previous[0]:
+                scored_routes[canonical_url] = (score, candidate.context)
+
+        ranked_routes = sorted(
+            scored_routes.items(),
+            key=lambda item: (
+                -item[1][0],
+                len([segment for segment in urlparse(item[0]).path.split("/") if segment]),
+                item[0],
+            ),
+        )
+        return [url for url, _details in ranked_routes[:max_routes]]
+
+    def _extract_static_internal_links(
+        self,
+        soup: BeautifulSoup,
+        base_url: str,
+    ) -> list[RenderedLinkCandidate]:
+        candidates: list[RenderedLinkCandidate] = []
+        for anchor in soup.select("a[href]"):
+            href = absolutize_url(base_url, anchor.get("href"))
+            if not href:
+                continue
+            text = self._clean_extracted_text(
+                anchor.get_text(" ", strip=True)
+                or anchor.get("aria-label", "")
+                or anchor.get("title", "")
+            )
+            candidates.append(
+                RenderedLinkCandidate(
+                    url=href,
+                    text=text,
+                    context=self._classify_link_context(anchor),
+                )
+            )
+        return candidates
+
+    def _classify_link_context(self, element: object) -> str:
+        for ancestor in [element, *getattr(element, "parents", [])]:
+            name = getattr(ancestor, "name", None)
+            if name == "nav":
+                return "nav"
+            if name == "header":
+                return "header"
+            if name == "main":
+                return "main"
+            if name == "footer":
+                return "footer"
+            getter = getattr(ancestor, "get", None)
+            if getter is None:
+                continue
+            class_value = getter("class") or []
+            if isinstance(class_value, str):
+                class_tokens = [class_value]
+            else:
+                class_tokens = [str(token) for token in class_value]
+            attribute_values = [
+                str(getter("id") or ""),
+                str(getter("aria-label") or ""),
+                *class_tokens,
+            ]
+            lowered = " ".join(attribute_values).lower()
+            if any(token in lowered for token in self.NAVIGATION_ATTRIBUTE_TOKENS):
+                return "nav"
+        return "other"
+
+    def _canonicalize_route_url(self, base_url: str, candidate_url: str) -> str | None:
+        resolved_url = absolutize_url(base_url, candidate_url)
+        if not resolved_url:
+            return None
+        parsed = urlparse(resolved_url)
+        base_parsed = urlparse(base_url)
+        if parsed.netloc.lower() != base_parsed.netloc.lower():
+            return None
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        normalized_path = parsed.path or "/"
+        if normalized_path != "/":
+            normalized_path = normalized_path.rstrip("/") or "/"
+        lowered_path = normalized_path.lower()
+        if lowered_path.endswith(self.NON_PAGE_ROUTE_SUFFIXES):
+            return None
+        if "/@" in lowered_path or lowered_path.startswith("/@"):
+            return None
+        return urlunparse(parsed._replace(path=normalized_path, query="", fragment=""))
+
+    def _score_route_candidate(
+        self,
+        root_url: str,
+        candidate_url: str,
+        text: str,
+        context: str,
+    ) -> int:
+        parsed_root = urlparse(root_url)
+        parsed_candidate = urlparse(candidate_url)
+        path = parsed_candidate.path.lower()
+        normalized_text = self._normalized_match_text(text)
+        combined = f"{path} {normalized_text}"
+        if any(token in combined for token in self.ROUTE_EXCLUDE_TOKENS):
+            return -1
+
+        path_segments = [segment for segment in parsed_candidate.path.split("/") if segment]
+        if not path_segments:
+            return -1
+
+        score = self.ROUTE_CONTEXT_SCORES.get(context, 0)
+        depth = len(path_segments)
+        if depth == 1:
+            score += 4
+        elif depth == 2:
+            score += 3
+        elif depth == 3:
+            score += 1
+        else:
+            score -= 2
+
+        root_segments = [segment for segment in parsed_root.path.split("/") if segment]
+        root_prefix = root_segments[0] if root_segments else None
+        candidate_prefix = path_segments[0] if path_segments else None
+        if root_prefix and candidate_prefix == root_prefix:
+            score += 2
+        elif root_prefix and candidate_prefix != root_prefix:
+            score -= 3
+
+        path_boost = 0
+        text_boost = 0
+        for keyword, boost in self.ROUTE_KEYWORD_BOOSTS.items():
+            if keyword in path:
+                path_boost += boost
+            if keyword in normalized_text:
+                text_boost = max(text_boost, max(1, boost // 2))
+        score += path_boost + text_boost
+
+        if 3 <= len(text) <= 40:
+            score += 1
+        if re.search(r"/20\\d{2}/|/\\d{4}/", path):
+            score -= 4
+        if depth >= 4:
+            score -= 3
+        if path.count("-") >= 4:
+            score -= 2
+        return score
 
     def _clean_extracted_text(self, value: str) -> str:
         text = self._normalize_text(value)
@@ -1161,6 +1710,9 @@ class WebAnalyzer:
                     continue
             break
         return text
+
+    def _format_note(self, prefix: str | None, message: str) -> str:
+        return f"{prefix}{message}" if prefix else message
 
     def _normalized_match_text(self, value: str) -> str:
         return (
@@ -1238,6 +1790,7 @@ class WebAnalyzer:
                     kind=asset.kind,
                     filename=asset.filename,
                     origin=asset.origin,
+                    page_url=asset.page_url,
                     url=asset.url,
                     mime_type=asset.mime_type,
                     alt_text=asset.alt_text,
@@ -1272,6 +1825,17 @@ class WebAnalyzer:
                     continue
                 seen.add(key)
                 merged.append(item)
+        return merged
+
+    def _merge_page_urls(self, *groups: list[str]) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for group in groups:
+            for page_url in group:
+                if page_url in seen:
+                    continue
+                seen.add(page_url)
+                merged.append(page_url)
         return merged
 
     def _asset_merge_key(self, asset: AssetRecord) -> str:

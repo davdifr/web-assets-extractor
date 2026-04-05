@@ -4,7 +4,7 @@ import unittest
 
 from bs4 import BeautifulSoup
 
-from web_assets_extractor.services.analyzer import WebAnalyzer
+from web_assets_extractor.services.analyzer import RenderedLinkCandidate, RenderedPageSnapshot, WebAnalyzer
 from web_assets_extractor.services.exporter import ReportExporter
 
 
@@ -89,6 +89,111 @@ class WebAnalyzerTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_build_copy_sections_assigns_page_url(self) -> None:
+        analyzer = WebAnalyzer(ReportExporter())
+        soup = BeautifulSoup(
+            """
+            <html>
+              <body>
+                <main>
+                  <h1>Brand headline</h1>
+                  <a href="/start">Start now</a>
+                  <p>This is a paragraph long enough to be considered meaningful product copy for the page.</p>
+                </main>
+              </body>
+            </html>
+            """,
+            "html.parser",
+        )
+
+        headlines, ctas, copy_blocks = analyzer._build_copy_sections(soup, "https://example.com/brand")
+
+        self.assertTrue(all(item.page_url == "https://example.com/brand" for item in headlines))
+        self.assertTrue(all(item.page_url == "https://example.com/brand" for item in ctas))
+        self.assertTrue(all(item.page_url == "https://example.com/brand" for item in copy_blocks))
+
+    def test_discover_site_routes_prioritizes_main_internal_pages(self) -> None:
+        analyzer = WebAnalyzer(ReportExporter())
+        html = """
+        <html>
+          <body>
+            <header>
+              <nav>
+                <a href="/s/about">About us</a>
+                <a href="/s/services">Services</a>
+                <a href="/s/contact">Contact</a>
+                <a href="/s/login">Login</a>
+              </nav>
+            </header>
+            <main>
+              <a href="/s/blog/2026/launch-story">Launch story</a>
+              <a href="https://external.example.com/partner">External</a>
+            </main>
+            <footer>
+              <a href="/privacy-policy">Privacy policy</a>
+            </footer>
+          </body>
+        </html>
+        """
+        rendered_snapshot = RenderedPageSnapshot(
+            html="",
+            final_url="https://brand.example.com/s/",
+            media_responses=[],
+            internal_links=[
+                RenderedLinkCandidate(
+                    url="https://brand.example.com/s/come-funziona",
+                    text="Come funziona",
+                    context="nav",
+                ),
+                RenderedLinkCandidate(
+                    url="https://brand.example.com/s/partner",
+                    text="Partner",
+                    context="footer",
+                ),
+            ],
+        )
+
+        routes = analyzer._discover_site_routes(
+            "https://brand.example.com/s/",
+            html,
+            rendered_snapshot,
+            max_routes=4,
+        )
+
+        self.assertEqual(
+            set(routes),
+            {
+                "https://brand.example.com/s/come-funziona",
+                "https://brand.example.com/s/about",
+                "https://brand.example.com/s/services",
+                "https://brand.example.com/s/contact",
+            },
+        )
+
+    def test_extract_assets_assigns_page_url(self) -> None:
+        analyzer = WebAnalyzer(ReportExporter())
+        soup = BeautifulSoup(
+            """
+            <html>
+              <body>
+                <img src="/images/logo.png" alt="Logo" />
+              </body>
+            </html>
+            """,
+            "html.parser",
+        )
+
+        assets = analyzer._extract_assets(
+            soup,
+            str(soup),
+            "https://example.com/brand",
+            [],
+            page_url="https://example.com/brand",
+        )
+
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0].page_url, "https://example.com/brand")
 
 
 if __name__ == "__main__":

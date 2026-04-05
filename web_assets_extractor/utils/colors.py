@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
-from io import BytesIO
 
-from PIL import Image, ImageColor
+from PIL import ImageColor
 
 
 HEX_COLOR_RE = re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
@@ -71,23 +69,3 @@ def extract_color_tokens(value: str) -> list[str]:
             if token:
                 tokens.append(token)
     return tokens
-
-
-def extract_palette_from_image(image_bytes: bytes, limit: int = 8) -> list[tuple[str, int]]:
-    with Image.open(BytesIO(image_bytes)) as image:
-        image = image.convert("RGB")
-        image.thumbnail((480, 480))
-        quantized = image.quantize(colors=max(limit, 8), method=Image.MEDIANCUT)
-        palette = quantized.getpalette() or []
-        colors = quantized.getcolors() or []
-
-    counter: Counter[str] = Counter()
-    for count, palette_index in colors:
-        start = palette_index * 3
-        rgb = palette[start : start + 3]
-        if len(rgb) != 3:
-            continue
-        hex_value = f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
-        counter[hex_value] += count
-
-    return counter.most_common(limit)

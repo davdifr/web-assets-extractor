@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import tempfile
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -23,12 +21,12 @@ class AssetPreview:
     content_bytes: bytes | None
     details: str
     media_path: str | None = None
+    media_url: str | None = None
     message: str = ""
 
 
 class AssetPreviewService:
     MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024
-    MAX_VIDEO_BYTES = 32 * 1024 * 1024
     MAX_IMAGE_SIZE = (320, 240)
 
     def __init__(self) -> None:
@@ -42,8 +40,6 @@ class AssetPreviewService:
                 )
             }
         )
-        self._video_cache_dir = Path(tempfile.gettempdir()) / "web-assets-extractor-preview"
-        self._video_cache_dir.mkdir(parents=True, exist_ok=True)
 
     def load_preview(self, asset: AssetRecord) -> AssetPreview:
         details = self._build_details(asset)
@@ -58,13 +54,22 @@ class AssetPreviewService:
 
         try:
             if asset.kind == "video":
-                video_path = self._prepare_video_path(asset)
+                if asset.origin == "yt-dlp[youtube-best]" and not asset.local_path:
+                    return AssetPreview(
+                        asset_id=asset.asset_id,
+                        mode="none",
+                        content_bytes=None,
+                        details=details,
+                        message="YouTube preview becomes available after download.",
+                    )
+                video_path, video_url = self._prepare_video_source(asset)
                 return AssetPreview(
                     asset_id=asset.asset_id,
                     mode="video",
                     content_bytes=None,
                     details=details,
-                    media_path=str(video_path),
+                    media_path=str(video_path) if video_path else None,
+                    media_url=video_url,
                 )
 
             if asset.inline_content is not None:
@@ -100,23 +105,16 @@ class AssetPreviewService:
                 message=f"Preview unavailable: {exc}",
             )
 
-    def _prepare_video_path(self, asset: AssetRecord) -> Path:
+    def _prepare_video_source(self, asset: AssetRecord) -> tuple[Path | None, str | None]:
         if asset.local_path:
             local_path = Path(asset.local_path)
             if local_path.is_file():
-                return local_path
+                return local_path, None
 
         if not asset.url:
             raise ValueError("Missing video source URL.")
 
-        source_hash = hashlib.sha1(asset.url.encode("utf-8")).hexdigest()
-        suffix = Path(asset.filename or asset.url).suffix or ".mp4"
-        cache_path = self._video_cache_dir / f"{source_hash}{suffix}"
-        if cache_path.is_file():
-            return cache_path
-
-        self._download_to_file(asset.url, cache_path, max_bytes=self.MAX_VIDEO_BYTES)
-        return cache_path
+        return None, asset.url
 
     def _read_asset_bytes(self, asset: AssetRecord) -> tuple[bytes, str]:
         if asset.local_path:
@@ -149,33 +147,6 @@ class AssetPreviewService:
                 raise ValueError("file too large for preview")
             chunks.append(chunk)
         return b"".join(chunks), content_type.lower()
-
-    def _download_to_file(self, url: str, destination: Path, *, max_bytes: int) -> None:
-        try:
-            response = self._session.get(url, timeout=20, stream=True)
-        except requests.exceptions.SSLError:
-            response = self._session.get(url, timeout=20, stream=True, verify=False)
-
-        response.raise_for_status()
-        content_length = response.headers.get("content-length")
-        if content_length and int(content_length) > max_bytes:
-            raise ValueError("video file too large for preview")
-
-        temp_path = destination.with_suffix(f"{destination.suffix}.part")
-        total_size = 0
-        try:
-            with temp_path.open("wb") as output_stream:
-                for chunk in response.iter_content(chunk_size=256 * 1024):
-                    if not chunk:
-                        continue
-                    total_size += len(chunk)
-                    if total_size > max_bytes:
-                        raise ValueError("video file too large for preview")
-                    output_stream.write(chunk)
-            temp_path.replace(destination)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink(missing_ok=True)
 
     def _build_raster_thumbnail(self, raw_bytes: bytes) -> bytes:
         with Image.open(BytesIO(raw_bytes)) as image:

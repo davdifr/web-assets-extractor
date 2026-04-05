@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 project_root = Path(SPECPATH).resolve()
+yt_dlp_datas = collect_data_files("yt_dlp")
+yt_dlp_hiddenimports = collect_submodules("yt_dlp")
 
 a = Analysis(
     ["web_assets_extractor/main.py"],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=yt_dlp_datas,
+    hiddenimports=yt_dlp_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -75,6 +75,7 @@ class OverviewTab(QWidget):
                 ("Duration", f"{result.duration_ms} ms"),
             )
         )
+        notes_html = "".join(f"<li>{escape(note)}</li>" for note in result.notes) or "<li>No additional notes.</li>"
 
         self._browser.setHtml(
             f"""
@@ -92,6 +93,8 @@ class OverviewTab(QWidget):
             <h4>Overview</h4>
             <p>Scope: {escape(options_text)}</p>
             <table cellspacing="0" cellpadding="4">{stats_rows}</table>
+            <h4>Notes</h4>
+            <ul>{notes_html}</ul>
             """
         )
 
@@ -472,10 +475,13 @@ class AssetsTab(QWidget):
             self._preview_stack.setCurrentIndex(2)
             return
 
-        if preview.mode == "video" and preview.media_path:
+        if preview.mode == "video" and (preview.media_path or preview.media_url):
             self._preview_video_hint_label.setText("Video preview ready. Click Play.")
             self._preview_video_play_button.setText("Play")
-            self._video_player.setSource(QUrl.fromLocalFile(preview.media_path))
+            if preview.media_path:
+                self._video_player.setSource(QUrl.fromLocalFile(preview.media_path))
+            elif preview.media_url:
+                self._video_player.setSource(QUrl(preview.media_url))
             self._preview_stack.setCurrentIndex(3)
             return
 

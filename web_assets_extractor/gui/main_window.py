@@ -280,12 +280,12 @@ class MainWindow(QMainWindow):
 
         self.results_tabs.show_log()
         self._append_log(f"Preparing download for {len(selected_asset_ids)} assets")
+        self._current_result.options.zip_downloads = self.zip_checkbox.isChecked()
 
         worker = DownloadWorker(
             self._downloader,
             self._current_result,
             selected_asset_ids,
-            self.zip_checkbox.isChecked(),
         )
         worker.signals.progress.connect(self._handle_progress)
         worker.signals.finished.connect(lambda result, w=worker: self._finish_download(w, result))

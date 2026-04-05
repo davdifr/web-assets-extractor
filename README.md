@@ -20,6 +20,12 @@ pip install -e .
 python -m web_assets_extractor.main
 ```
 
+Per scaricare stream media chunked e combinare audio + video in un file finale `MP4` tramite muxing, `ffmpeg` deve essere installato e disponibile nel `PATH`.
+
+Per i video YouTube, l'app usa `yt-dlp`: se `ffmpeg` e disponibile scarica e combina la miglior coppia audio/video, altrimenti ripiega automaticamente su un `MP4` progressivo.
+
+Per i siti che montano gli asset via JavaScript, l'app usa anche Playwright per leggere il DOM renderizzato. Se il browser Playwright non e presente nel bundle, l'analisi prova automaticamente a usare Chrome o Edge installati sul computer.
+
 ## Build Desktop
 
 Per generare la cartella `dist/` con un bundle desktop PySide6:

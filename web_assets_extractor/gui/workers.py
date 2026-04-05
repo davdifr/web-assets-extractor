@@ -51,13 +51,11 @@ class DownloadWorker(QRunnable):
         downloader: AssetDownloader,
         result: AnalysisResult,
         selected_asset_ids: Sequence[str],
-        create_zip: bool,
     ) -> None:
         super().__init__()
         self._downloader = downloader
         self._result = result
         self._selected_asset_ids = list(selected_asset_ids)
-        self._create_zip = create_zip
         self.signals = WorkerSignals()
 
     def run(self) -> None:
@@ -65,7 +63,6 @@ class DownloadWorker(QRunnable):
             updated_result = self._downloader.download_selected_assets(
                 self._result,
                 self._selected_asset_ids,
-                self._create_zip,
                 progress_callback=self.signals.progress.emit,
             )
         except Exception:
